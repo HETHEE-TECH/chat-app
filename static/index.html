@@ -336,9 +336,13 @@
     };
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
-      if (m.type === "presence") {
+      if (m.type === "typing") {
+        if (m.user !== state.me) {
+          $("typing-ind").textContent = m.user ? m.user + " is typing..." : "";
+        }
+      } else if (m.type === "presence") {
         state.online = new Set(m.online);
-        refreshLists().catch(() => {});   // also picks up newly registered users
+        refreshLists().catch(() => {});
       } else if (m.type === "room_created") {
         refreshLists().catch(() => {});
       } else if (m.type === "message") {
@@ -451,19 +455,6 @@
     }
   }
 
-  // Handle typing messages
-  const origWsMsg = ws => ws.onmessage;
-  if (state.ws) {
-    const origHandler = state.ws.onmessage;
-    state.ws.onmessage = function(ev) {
-      const m = JSON.parse(ev.data);
-      if (m.type === "typing" && m.user !== state.me) {
-        $("typing-ind").textContent = m.user ? m.user + " is typing..." : "";
-      } else {
-        origHandler.call(this, ev);
-      }
-    };
-  }
 
   // ------------------------------------------------------------ PWA service worker
   if ("serviceWorker" in navigator) {
