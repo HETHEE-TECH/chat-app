@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat App</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --border: #e2e5ea; --text: #1d2129;
+    --muted: #7a8190; --accent: #4f6bed; --accent-text: #ffffff; --mine: #e6ebff; --theirs: #f0f1f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1c1f25; --border: #2c3038; --text: #e8eaee;
+      --muted: #8b92a1; --accent: #6b82f5; --accent-text: #ffffff; --mine: #2a3563; --theirs: #262a32;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); height: 100vh; }
+  button, input { font: inherit; }
+  .hidden { display: none !important; }
+
+  /* auth */
+  #auth { display: flex; align-items: center; justify-content: center; height: 100%; padding: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 28px; width: 100%; max-width: 360px; }
+  .card h1 { margin: 0 0 4px; font-size: 22px; }
+  .card p { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+  .card input { width: 100%; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+  .btn { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 600; }
+  .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 8px 0 0; font-size: 14px; }
+  #auth-error { color: #d64545; font-size: 13px; min-height: 18px; margin-bottom: 6px; }
+
+  /* app layout */
+  #app { display: flex; height: 100%; }
+  aside { width: 260px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .side-head { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .side-head strong { font-size: 15px; }
+  .side-head button { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; }
+  .side-scroll { overflow-y: auto; flex: 1; padding: 8px 0; }
+  .section-title { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px 4px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .section-title button { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 18px; line-height: 1; padding: 0 2px; }
+  .item { display: flex; align-items: center; gap: 8px; padding: 8px 16px; cursor: pointer; font-size: 14px; }
+  .item:hover { background: var(--bg); }
+  .item.active { background: var(--mine); }
+  .item.unread .label { font-weight: 700; }
+  .item.unread::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-left: auto; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); flex: none; }
+  .dot.on { background: #34b36b; }
+
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #chat-title { padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); font-weight: 600; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 8px; }
+  .empty { margin: auto; color: var(--muted); }
+  .msg { max-width: 70%; padding: 8px 12px; border-radius: 12px; background: var(--theirs); word-wrap: break-word; white-space: pre-wrap; }
+  .msg.mine { align-self: flex-end; background: var(--mine); }
+  .meta { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+  #composer input { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+  #composer button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 600; }
+  #status { font-size: 12px; color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--border); }
+
+  @media (max-width: 640px) {
+    aside { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid var(--border); }
+    #app { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<section id="auth">
+  <div class="card">
+    <h1 id="auth-title">Welcome back</h1>
+    <p id="auth-sub">Log in to start chatting.</p>
+    <div id="auth-error"></div>
+    <input id="username" placeholder="Username" autocomplete="username">
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="btn" id="auth-submit">Log in</button>
+    <button class="link" id="auth-toggle">Need an account? Sign up</button>
+  </div>
+</section>
+
+<section id="app" class="hidden">
+  <aside>
+    <div class="side-head">
+      <strong id="me-name"></strong>
+      <button id="logout">Log out</button>
+    </div>
+    <div class="side-scroll">
+      <div class="section-title"><span>Rooms</span><button id="add-room" title="New room">+</button></div>
+      <div id="rooms"></div>
+      <div class="section-title"><span>People</span></div>
+      <div id="users"></div>
+    </div>
+    <div id="status">Connecting…</div>
+  </aside>
+  <main>
+    <div id="chat-title">Select a room or person</div>
+    <div id="messages"><div class="empty">Pick a conversation to start chatting.</div></div>
+    <form id="composer" class="hidden">
+      <input id="text" placeholder="Type a message…" autocomplete="off" maxlength="2000">
+      <button type="submit">Send</button>
+    </form>
+  </main>
+</section>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { token: null, me: null, ws: null, current: null, online: new Set(),
+                  rooms: [], users: [], unread: new Set(), registerMode: false };
+
+  // ------------------------------------------------------------ api helpers
+  async function api(path, method = "GET", body) {
+    const res = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...(state.token ? { Authorization: "Bearer " + state.token } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401 && state.token) logout();
+      throw new Error(data.detail || "Request failed");
+    }
+    return data;
+  }
+
+  // ------------------------------------------------------------ auth UI
+  function setMode(register) {
+    state.registerMode = register;
+    $("auth-title").textContent = register ? "Create account" : "Welcome back";
+    $("auth-sub").textContent = register ? "Pick a username and password." : "Log in to start chatting.";
+    $("auth-submit").textContent = register ? "Sign up" : "Log in";
+    $("auth-toggle").textContent = register ? "Have an account? Log in" : "Need an account? Sign up";
+    $("auth-error").textContent = "";
+  }
+  $("auth-toggle").onclick = () => setMode(!state.registerMode);
+
+  async function submitAuth() {
+    $("auth-error").textContent = "";
+    try {
+      const data = await api(state.registerMode ? "/api/register" : "/api/login", "POST",
+        { username: $("username").value, password: $("password").value });
+      startSession(data.token, data.username);
+    } catch (e) { $("auth-error").textContent = e.message; }
+  }
+  $("auth-submit").onclick = submitAuth;
+  $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
+
+  function startSession(token, username) {
+    state.token = token; state.me = username;
+    try { sessionStorage.setItem("chat-session", JSON.stringify({ token, username })); } catch (_) {}
+    $("auth").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("me-name").textContent = username;
+    $("password").value = "";
+    connect();
+    refreshLists().then(() => { if (state.rooms.includes("general")) openChat("room", "general"); });
+  }
+
+  function logout() {
+    try { sessionStorage.removeItem("chat-session"); } catch (_) {}
+    if (state.ws) { state.ws.onclose = null; state.ws.close(); }
+    Object.assign(state, { token: null, me: null, ws: null, current: null });
+    $("app").classList.add("hidden");
+    $("auth").classList.remove("hidden");
+  }
+  $("logout").onclick = logout;
+
+  // ------------------------------------------------------------ sidebar
+  async function refreshLists() {
+    [state.rooms, state.users] = await Promise.all([api("/api/rooms"), api("/api/users")]);
+    renderSidebar();
+  }
+
+  function itemEl(label, key, active, withDot, online) {
+    const el = document.createElement("div");
+    el.className = "item" + (active ? " active" : "") + (state.unread.has(key) ? " unread" : "");
+    if (withDot) { const d = document.createElement("span"); d.className = "dot" + (online ? " on" : ""); el.appendChild(d); }
+    const l = document.createElement("span"); l.className = "label"; l.textContent = label; el.appendChild(l);
+    return el;
+  }
+
+  function renderSidebar() {
+    const roomsEl = $("rooms"), usersEl = $("users");
+    roomsEl.replaceChildren(); usersEl.replaceChildren();
+    for (const r of state.rooms) {
+      const key = "room:" + r;
+      const el = itemEl("# " + r, key, state.current && state.current.key === key);
+      el.onclick = () => openChat("room", r);
+      roomsEl.appendChild(el);
+    }
+    for (const u of state.users) {
+      const key = "dm:" + u;
+      const el = itemEl(u, key, state.current && state.current.key === key, true, state.online.has(u));
+      el.onclick = () => openChat("dm", u);
+      usersEl.appendChild(el);
+    }
+  }
+
+  $("add-room").onclick = async () => {
+    const name = prompt("New room name (3-20 letters, numbers, _ or -):");
+    if (!name) return;
+    try { const r = await api("/api/rooms", "POST", { name }); await refreshLists(); openChat("room", r.name); }
+    catch (e) { alert(e.message); }
+  };
+
+  // ------------------------------------------------------------ chat view
+  async function openChat(kind, name) {
+    const key = kind + ":" + name;
+    state.current = { kind, name, key };
+    state.unread.delete(key);
+    renderSidebar();
+    $("chat-title").textContent = kind === "room" ? "# " + name : name;
+    $("composer").classList.remove("hidden");
+    $("messages").replaceChildren();
+    const q = kind === "room" ? "room=" + encodeURIComponent(name) : "with=" + encodeURIComponent(name);
+    try {
+      const history = await api("/api/history?" + q);
+      if (!state.current || state.current.key !== key) return;
+      if (!history.length) showEmpty();
+      history.forEach(appendMessage);
+      scrollDown();
+    } catch (e) { /* ignore */ }
+    $("text").focus();
+  }
+
+  function showEmpty() {
+    const d = document.createElement("div"); d.className = "empty"; d.id = "empty";
+    d.textContent = "No messages yet. Say hello!"; $("messages").appendChild(d);
+  }
+
+  function appendMessage(m) {
+    const empty = $("empty"); if (empty) empty.remove();
+    const el = document.createElement("div");
+    el.className = "msg" + (m.sender === state.me ? " mine" : "");
+    const meta = document.createElement("div"); meta.className = "meta";
+    meta.textContent = (m.sender === state.me ? "You" : m.sender) + " · " +
+      new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const body = document.createElement("div"); body.textContent = m.content;
+    el.append(meta, body);
+    $("messages").appendChild(el);
+  }
+
+  function scrollDown() { const m = $("messages"); m.scrollTop = m.scrollHeight; }
+
+  $("composer").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const content = $("text").value.trim();
+    if (!content || !state.current || !state.ws || state.ws.readyState !== 1) return;
+    const c = state.current;
+    state.ws.send(JSON.stringify(c.kind === "room"
+      ? { type: "room", room: c.name, content }
+      : { type: "dm", to: c.name, content }));
+    $("text").value = "";
+  });
+
+  // ------------------------------------------------------------ websocket
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
+    state.ws = ws;
+    ws.onopen = () => { $("status").textContent = "Connected"; };
+    ws.onclose = () => {
+      if (!state.token) return;
+      $("status").textContent = "Disconnected. Reconnecting…";
+      setTimeout(() => { if (state.token) connect(); }, 2000);
+    };
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "presence") {
+        state.online = new Set(m.online);
+        refreshLists().catch(() => {});   // also picks up newly registered users
+      } else if (m.type === "room_created") {
+        refreshLists().catch(() => {});
+      } else if (m.type === "message") {
+        const key = m.kind === "room" ? "room:" + m.room
+          : "dm:" + (m.sender === state.me ? m.recipient : m.sender);
+        if (state.current && state.current.key === key) { appendMessage(m); scrollDown(); }
+        else if (m.sender !== state.me) { state.unread.add(key); renderSidebar(); }
+      }
+    };
+  }
+
+  // ------------------------------------------------------------ restore session
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("chat-session") || "null");
+    if (saved && saved.token) startSession(saved.token, saved.username);
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>
