@@ -59,7 +59,13 @@ def init_db() -> None:
                 sender TEXT NOT NULL,
                 recipient TEXT,
                 content TEXT NOT NULL,
-                ts REAL NOT NULL
+                ts REAL NOT NULL,
+                has_image INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS profiles (
+                username TEXT PRIMARY KEY,
+                bio TEXT DEFAULT '',
+                avatar TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_msg_room ON messages(room, id);
             CREATE INDEX IF NOT EXISTS idx_msg_dm ON messages(sender, recipient, id);
@@ -109,6 +115,11 @@ class Credentials(BaseModel):
 
 class RoomIn(BaseModel):
     name: str
+
+
+class ProfileUpdate(BaseModel):
+    bio: str = ""
+    avatar: str = ""
 
 
 @app.post("/api/register")
@@ -171,6 +182,24 @@ def list_users(me: str = Depends(current_user)):
     with closing(db()) as conn:
         rows = conn.execute("SELECT username FROM users WHERE username != ? ORDER BY username", (me,))
         return [r["username"] for r in rows]
+
+
+@app.get("/api/profile/{username}")
+def get_profile(username: str, _: str = Depends(current_user)):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT bio, avatar FROM profiles WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return {"username": username, "bio": "", "avatar": ""}
+        return {"username": username, "bio": row["bio"], "avatar": row["avatar"]}
+
+
+@app.post("/api/profile")
+def update_profile(profile: ProfileUpdate, me: str = Depends(current_user)):
+    with closing(db()) as conn:
+        conn.execute("INSERT OR REPLACE INTO profiles(username, bio, avatar) VALUES (?, ?, ?)",
+                    (me, profile.bio[:500], profile.avatar[:500]))
+        conn.commit()
+    return {"success": True}
 
 
 def row_to_message(r: sqlite3.Row) -> dict:
@@ -278,7 +307,11 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
             if not content:
                 continue
             kind = data.get("type")
-            if kind == "room":
+            if kind == "typing":
+                # Broadcast typing indicator
+                target = data.get("target")  # room name or username
+                await manager.broadcast({"type": "typing", "user": username, "target": target})
+            elif kind == "room":
                 room = str(data.get("room", ""))
                 with closing(db()) as conn:
                     exists = conn.execute("SELECT 1 FROM rooms WHERE name = ?", (room,)).fetchone()
@@ -293,6 +326,17 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
                     continue
                 msg = save_message(None, username, to, content)
                 await manager.send_to_users({username, to}, msg)
+            elif kind == "image":
+                # Handle image message
+                img_data = str(data.get("image", ""))[:5000]  # Limit to 5KB base64
+                room = data.get("room")
+                to = data.get("to")
+                if room:
+                    msg = save_message(room, username, None, img_data)
+                    await manager.broadcast(msg)
+                elif to:
+                    msg = save_message(None, username, to, img_data)
+                    await manager.send_to_users({username, to}, msg)
     except WebSocketDisconnect:
         pass
     finally:

@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#4f6bed">
+<meta name="description" content="Free unlimited chat app with group rooms and private messages">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%234f6bed' width='192' height='192'/><text x='50%' y='50%' font-size='120' font-weight='bold' fill='white' text-anchor='middle' dominant-baseline='central'>💬</text></svg>">
 <title>Chat App</title>
 <style>
   :root {
@@ -57,7 +61,27 @@
   #composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
   #composer input { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
   #composer button { padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 600; }
+  #emoji-btn { background: none; border: 0; font-size: 20px; cursor: pointer; padding: 8px; }
+  #emoji-picker { display: none; position: absolute; bottom: 60px; right: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 8px; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+  #emoji-picker.show { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+  #emoji-picker button { background: none; border: 0; font-size: 24px; cursor: pointer; padding: 4px; border-radius: 6px; }
+  #emoji-picker button:hover { background: var(--bg); }
   #status { font-size: 12px; color: var(--muted); padding: 6px 16px; border-top: 1px solid var(--border); }
+
+  /* Profile & typing */
+  .typing-indicator { font-size: 12px; color: var(--muted); padding: 4px 0; font-style: italic; }
+  #profile-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; }
+  #profile-modal.show { display: flex; align-items: center; justify-content: center; }
+  .profile-card { background: var(--panel); border-radius: 12px; padding: 24px; width: 90%; max-width: 400px; }
+  .profile-card h2 { margin: 0 0 16px; }
+  .profile-card input, .profile-card textarea { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-family: inherit; }
+  .profile-card textarea { resize: vertical; min-height: 80px; }
+  .profile-card button { width: 100%; padding: 10px; background: var(--accent); color: white; border: 0; border-radius: 8px; cursor: pointer; }
+
+  /* Image sharing */
+  #image-input { display: none; }
+  #image-btn { background: none; border: 0; font-size: 20px; cursor: pointer; padding: 8px; }
+  .image-preview { max-width: 200px; max-height: 200px; border-radius: 8px; margin-top: 8px; }
 
   @media (max-width: 640px) {
     aside { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -82,7 +106,7 @@
 <section id="app" class="hidden">
   <aside>
     <div class="side-head">
-      <strong id="me-name"></strong>
+      <strong id="me-name" style="cursor: pointer;" title="Click to edit profile"></strong>
       <button id="logout">Log out</button>
     </div>
     <div class="side-scroll">
@@ -96,10 +120,27 @@
   <main>
     <div id="chat-title">Select a room or person</div>
     <div id="messages"><div class="empty">Pick a conversation to start chatting.</div></div>
-    <form id="composer" class="hidden">
+    <div class="typing-indicator" id="typing-ind"></div>
+    <form id="composer" class="hidden" style="position: relative;">
       <input id="text" placeholder="Type a message…" autocomplete="off" maxlength="2000">
+      <input type="file" id="image-input" accept="image/*">
+      <button id="image-btn" type="button" title="Share image">📸</button>
+      <button id="emoji-btn" type="button" title="Emoji">😊</button>
       <button type="submit">Send</button>
+      <div id="emoji-picker"></div>
     </form>
+  </main>
+</section>
+
+<div id="profile-modal">
+  <div class="profile-card">
+    <h2>Edit Profile</h2>
+    <input id="profile-bio" placeholder="Bio (max 500 chars)" maxlength="500">
+    <textarea id="profile-avatar" placeholder="Avatar emoji or description"></textarea>
+    <button id="save-profile">Save Profile</button>
+    <button id="close-profile" style="background: var(--muted); margin-top: 8px;">Close</button>
+  </div>
+</div>
   </main>
 </section>
 
@@ -243,6 +284,34 @@
 
   function scrollDown() { const m = $("messages"); m.scrollTop = m.scrollHeight; }
 
+  // ------------------------------------------------------------ emoji picker
+  const emojis = ['😀', '😂', '😍', '🥰', '😘', '😎', '🤔', '👍', '❤️', '🔥', '✨', '🎉', '🚀', '💯', '👏', '😅', '🤣', '😇', '🥳', '💪', '🙌', '😋', '🤐', '😴', '😡', '😢', '😂', '🤪', '😱', '🤯'];
+  const picker = $("emoji-picker");
+  const emojiBtn = $("emoji-btn");
+
+  emojis.forEach(emoji => {
+    const btn = document.createElement("button");
+    btn.textContent = emoji;
+    btn.type = "button";
+    btn.onclick = (e) => {
+      e.preventDefault();
+      const input = $("text");
+      input.value += emoji;
+      input.focus();
+      picker.classList.remove("show");
+    };
+    picker.appendChild(btn);
+  });
+
+  emojiBtn.onclick = (e) => {
+    e.preventDefault();
+    picker.classList.toggle("show");
+  };
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#composer")) picker.classList.remove("show");
+  });
+
   $("composer").addEventListener("submit", (e) => {
     e.preventDefault();
     const content = $("text").value.trim();
@@ -286,6 +355,124 @@
     const saved = JSON.parse(sessionStorage.getItem("chat-session") || "null");
     if (saved && saved.token) startSession(saved.token, saved.username);
   } catch (_) {}
+
+  // ------------------------------------------------------------ Profiles
+  async function loadProfile(username) {
+    try {
+      const res = await api(`/api/profile/${encodeURIComponent(username)}`);
+      return res;
+    } catch (e) {
+      return { username, bio: "", avatar: "" };
+    }
+  }
+
+  async function saveProfile() {
+    const bio = $("profile-bio").value;
+    const avatar = $("profile-avatar").value;
+    try {
+      await api("/api/profile", "POST", { bio, avatar });
+      alert("Profile updated!");
+      $("profile-modal").classList.remove("show");
+    } catch (e) {
+      alert("Error: " + e.message);
+    }
+  }
+
+  $("me-name").onclick = async () => {
+    if (!state.current) return;
+    const prof = await loadProfile(state.me);
+    $("profile-bio").value = prof.bio;
+    $("profile-avatar").value = prof.avatar;
+    $("profile-modal").classList.add("show");
+  };
+
+  $("save-profile").onclick = saveProfile;
+  $("close-profile").onclick = () => $("profile-modal").classList.remove("show");
+
+  // ------------------------------------------------------------ Typing Indicator
+  let typingTimeout;
+  $("text").addEventListener("input", () => {
+    if (!state.ws || state.ws.readyState !== 1) return;
+    const c = state.current;
+    if (!c) return;
+    state.ws.send(JSON.stringify({
+      type: "typing",
+      target: c.kind === "room" ? c.name : c.name
+    }));
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+      if (state.ws && state.ws.readyState === 1) {
+        state.ws.send(JSON.stringify({ type: "typing", target: "", user: state.me }));
+      }
+    }, 2000);
+  });
+
+  // ------------------------------------------------------------ Image Sharing
+  $("image-btn").onclick = (e) => {
+    e.preventDefault();
+    $("image-input").click();
+  };
+
+  $("image-input").onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file || !state.current) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const base64 = evt.target.result.split(",")[1];
+      const c = state.current;
+      if (state.ws && state.ws.readyState === 1) {
+        state.ws.send(JSON.stringify(c.kind === "room"
+          ? { type: "image", room: c.name, image: base64 }
+          : { type: "image", to: c.name, image: base64 }));
+      }
+      $("image-input").value = "";
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Update appendMessage to handle images
+  const origAppendMessage = appendMessage;
+  function appendMessage(m) {
+    if (m.content && m.content.startsWith("/9j/") || m.content.startsWith("iVBO")) {
+      // It's base64 image
+      const empty = $("empty"); if (empty) empty.remove();
+      const el = document.createElement("div");
+      el.className = "msg" + (m.sender === state.me ? " mine" : "");
+      const meta = document.createElement("div"); meta.className = "meta";
+      meta.textContent = (m.sender === state.me ? "You" : m.sender) + " · " +
+        new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const img = document.createElement("img");
+      img.className = "image-preview";
+      img.src = "data:image/jpeg;base64," + m.content;
+      el.append(meta, img);
+      $("messages").appendChild(el);
+    } else {
+      origAppendMessage(m);
+    }
+  }
+
+  // Handle typing messages
+  const origWsMsg = ws => ws.onmessage;
+  if (state.ws) {
+    const origHandler = state.ws.onmessage;
+    state.ws.onmessage = function(ev) {
+      const m = JSON.parse(ev.data);
+      if (m.type === "typing" && m.user !== state.me) {
+        $("typing-ind").textContent = m.user ? m.user + " is typing..." : "";
+      } else {
+        origHandler.call(this, ev);
+      }
+    };
+  }
+
+  // ------------------------------------------------------------ PWA service worker
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/static/service-worker.js").then((reg) => {
+      console.log("Service worker registered!");
+    }).catch((err) => {
+      console.log("Service worker registration failed:", err);
+    });
+  }
 })();
 </script>
 </body>
