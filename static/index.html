@@ -243,6 +243,14 @@
             margin-top: 4px;
         }
 
+        .typing {
+            height: 20px;
+            padding: 0 20px;
+            font-size: 12px;
+            color: #666;
+            font-style: italic;
+        }
+
         .input-area {
             padding: 15px;
             border-top: 1px solid #ddd;
@@ -350,6 +358,7 @@
                 <span id="chatHeader">Select a chat</span>
             </div>
             <div class="messages" id="messages"></div>
+            <div class="typing" id="typing"></div>
             <div class="input-area">
                 <div class="input-form">
                     <input type="text" id="messageInput" placeholder="Type a message...">
@@ -367,6 +376,8 @@
         let currentDM = null;
         let ws = null;
         let onlineUsers = new Set();
+        let typingUsers = {};      // username -> timeout id
+        let lastTypingSent = 0;
 
         // ===== INIT =====
         if (token && username) {
@@ -506,6 +517,7 @@
         function selectRoom(room) {
             currentRoom = room;
             currentDM = null;
+            resetTyping();
             document.getElementById('chatScreen').classList.add('in-chat');
             updateActive();
             loadHistory();
@@ -514,6 +526,7 @@
         function selectUser(user) {
             currentRoom = null;
             currentDM = user;
+            resetTyping();
             document.getElementById('chatScreen').classList.add('in-chat');
             updateActive();
             loadHistory();
@@ -598,6 +611,47 @@
             input.value = '';
         }
 
+        // ===== TYPING INDICATOR =====
+        function sendTyping() {
+            if (!ws || ws.readyState !== 1) return;
+            const now = Date.now();
+            if (now - lastTypingSent < 2000) return;
+            if (currentRoom) {
+                ws.send(JSON.stringify({ type: 'typing', room: currentRoom }));
+            } else if (currentDM) {
+                ws.send(JSON.stringify({ type: 'typing', to: currentDM }));
+            } else {
+                return;
+            }
+            lastTypingSent = now;
+        }
+
+        function showTyping(user) {
+            clearTimeout(typingUsers[user]);
+            typingUsers[user] = setTimeout(() => clearTyping(user), 3000);
+            renderTyping();
+        }
+
+        function clearTyping(user) {
+            clearTimeout(typingUsers[user]);
+            delete typingUsers[user];
+            renderTyping();
+        }
+
+        function resetTyping() {
+            Object.values(typingUsers).forEach(clearTimeout);
+            typingUsers = {};
+            renderTyping();
+        }
+
+        function renderTyping() {
+            const names = Object.keys(typingUsers);
+            const el = document.getElementById('typing');
+            if (names.length === 0) el.textContent = '';
+            else if (names.length === 1) el.textContent = names[0] + ' is typing...';
+            else el.textContent = names.join(', ') + ' are typing...';
+        }
+
         // ===== WEBSOCKET =====
         function connectWebSocket() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -613,7 +667,13 @@
                     onlineUsers = new Set(msg.online);
                     // refresh the list so newly signed-up friends appear
                     loadUsers().then(() => { updateActive(); updateOnlineStatus(); });
+                } else if (msg.type === 'typing') {
+                    const inThisChat =
+                        (msg.kind === 'room' && msg.room === currentRoom) ||
+                        (msg.kind === 'dm' && msg.user === currentDM);
+                    if (inThisChat && msg.user !== username) showTyping(msg.user);
                 } else if (msg.type === 'message') {
+                    clearTyping(msg.sender);
                     if ((msg.kind === 'room' && msg.room === currentRoom) ||
                         (msg.kind === 'dm' && ((msg.sender === currentDM && msg.recipient === username) ||
                                                (msg.sender === username && msg.recipient === currentDM)))) {
@@ -638,6 +698,7 @@
 
         // ===== ENTER TO SEND =====
         document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('messageInput')?.addEventListener('input', sendTyping);
             document.getElementById('messageInput')?.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();

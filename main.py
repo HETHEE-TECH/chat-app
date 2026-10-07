@@ -262,6 +262,11 @@ class ConnectionManager:
             if name in usernames:
                 await self._send(ws, payload)
 
+    async def broadcast_except(self, sender: str, payload: dict) -> None:
+        for ws, name in list(self.conns.items()):
+            if name != sender:
+                await self._send(ws, payload)
+
     async def announce_presence(self) -> None:
         await self.broadcast({"type": "presence", "online": self.online_users()})
 
@@ -303,15 +308,24 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
                 data = json.loads(await ws.receive_text())
             except json.JSONDecodeError:
                 continue
+            kind = data.get("type")
+            if kind == "typing":
+                room = data.get("room")
+                to = data.get("to")
+                if room:
+                    await manager.broadcast_except(
+                        username,
+                        {"type": "typing", "kind": "room", "room": str(room), "user": username},
+                    )
+                elif to:
+                    await manager.send_to_users(
+                        {str(to)}, {"type": "typing", "kind": "dm", "user": username}
+                    )
+                continue
             content = str(data.get("content", "")).strip()[:MAX_MESSAGE_LEN]
             if not content:
                 continue
-            kind = data.get("type")
-            if kind == "typing":
-                # Broadcast typing indicator
-                target = data.get("target")  # room name or username
-                await manager.broadcast({"type": "typing", "user": username, "target": target})
-            elif kind == "room":
+            if kind == "room":
                 room = str(data.get("room", ""))
                 with closing(db()) as conn:
                     exists = conn.execute("SELECT 1 FROM rooms WHERE name = ?", (room,)).fetchone()

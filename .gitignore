@@ -1,3 +1,6 @@
 chat.db
 __pycache__/
 main_broken.py
+
+main_backup.py
+static/index_backup.html
