@@ -69,6 +69,11 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_msg_room ON messages(room, id);
             CREATE INDEX IF NOT EXISTS idx_msg_dm ON messages(sender, recipient, id);
+            CREATE TABLE IF NOT EXISTS profiles (
+                username TEXT PRIMARY KEY,
+                avatar TEXT DEFAULT '😊',
+                bio TEXT DEFAULT ''
+            );
             """
         )
         conn.execute("INSERT OR IGNORE INTO rooms(name) VALUES ('general')")
@@ -182,6 +187,30 @@ def list_users(me: str = Depends(current_user)):
     with closing(db()) as conn:
         rows = conn.execute("SELECT username FROM users WHERE username != ? ORDER BY username", (me,))
         return [r["username"] for r in rows]
+
+@app.get("/api/profile/{username}")
+def get_profile(username: str, _: str = Depends(current_user)):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT avatar, bio FROM profiles WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return {"username": username, "avatar": "😊", "bio": ""}
+    return {"username": username, "avatar": row["avatar"], "bio": row["bio"]}
+
+class ProfileUpdate(BaseModel):
+    avatar: str = "😊"
+    bio: str = ""
+
+@app.post("/api/profile")
+def update_profile(data: ProfileUpdate, me: str = Depends(current_user)):
+    avatar = str(data.avatar)[:2]
+    bio = str(data.bio)[:200]
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO profiles(username, avatar, bio) VALUES (?, ?, ?)",
+            (me, avatar, bio),
+        )
+        conn.commit()
+    return {"avatar": avatar, "bio": bio}
 
 
 @app.get("/api/profile/{username}")
