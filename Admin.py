@@ -6,9 +6,14 @@ Register those usernames yourself BEFORE exposing the app, so nobody else can cl
 import hashlib
 import os
 import secrets
+import sqlite3
+import tempfile
+import time
 from contextlib import closing
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from groups import cleanup_user
 
@@ -33,6 +38,7 @@ def make_router(db, current_user, manager) -> APIRouter:
                 """SELECT u.id, u.username,
                           COALESCE(p.bio, '') AS bio,
                           COALESCE(p.avatar, '') AS avatar,
+                          u.last_seen AS last_online,
                           (SELECT COUNT(*) FROM messages m
                             WHERE m.sender = u.username AND m.deleted = 0) AS msg_count,
                           (SELECT MAX(ts) FROM messages m
@@ -49,6 +55,7 @@ def make_router(db, current_user, manager) -> APIRouter:
                 "avatar": r["avatar"],
                 "msg_count": r["msg_count"],
                 "last_message_ts": r["last_ts"],
+                "last_online": r["last_online"],
                 "online": r["username"] in online,
                 "is_admin": r["username"] in ADMINS,
             }
@@ -126,6 +133,25 @@ def make_router(db, current_user, manager) -> APIRouter:
                     pass
         await manager.announce_presence()
         return {"username": username, "temp_password": temp}
+
+    @router.get("/backup")
+    def download_backup(_: str = Depends(admin_only)):
+        """A consistent copy of the whole database (users, messages, groups ...)."""
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        src = db()
+        dst = sqlite3.connect(path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename="chat-backup-" + time.strftime("%Y%m%d-%H%M") + ".db",
+            background=BackgroundTask(os.remove, path),
+        )
 
     # ------------------------------------------------------------ rooms / groups
     @router.get("/rooms")

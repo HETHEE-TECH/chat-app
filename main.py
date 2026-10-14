@@ -15,7 +15,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -95,11 +95,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN has_image INTEGER DEFAULT 0")
         if "reply_to" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER DEFAULT NULL")
-        if "read_at" not in cols:
-            conn.execute("ALTER TABLE messages ADD COLUMN read_at REAL DEFAULT NULL")
+        ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        if "last_seen" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN last_seen REAL")
+        if "hide_last_seen" not in ucols:
+            conn.execute("ALTER TABLE users ADD COLUMN hide_last_seen INTEGER DEFAULT 0")
         pcols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles)")}
-        if "read_receipts" not in pcols:
-            conn.execute("ALTER TABLE profiles ADD COLUMN read_receipts INTEGER DEFAULT 1")
         if "photo" not in pcols:
             conn.execute("ALTER TABLE profiles ADD COLUMN photo TEXT")
         if "photo_ts" not in pcols:
@@ -177,16 +178,35 @@ def register(creds: Credentials):
     return {"token": token, "username": username}
 
 
+# ---- simple brute-force protection: max failed logins per (ip, username) in a time window
+LOGIN_WINDOW_SEC = 600
+LOGIN_MAX_FAILS = 8
+_login_fails: dict[str, list[float]] = {}
+
+
+def _check_login_rate(key: str) -> None:
+    now = time.time()
+    recent = [t for t in _login_fails.get(key, []) if now - t < LOGIN_WINDOW_SEC]
+    _login_fails[key] = recent
+    if len(recent) >= LOGIN_MAX_FAILS:
+        raise HTTPException(429, "Too many failed attempts. Please try again in a few minutes.")
+
+
 @app.post("/api/login")
-def login(creds: Credentials):
+def login(creds: Credentials, request: Request):
     username = creds.username.strip()
+    ip = request.client.host if request.client else "?"
+    key = f"{ip}:{username.lower()}"
+    _check_login_rate(key)
     with closing(db()) as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         if not row or not hmac.compare_digest(
             row["password_hash"], hash_password(creds.password, row["salt"])
         ):
+            _login_fails.setdefault(key, []).append(time.time())
             raise HTTPException(401, "Invalid username or password")
         token = issue_token(conn, username)
+    _login_fails.pop(key, None)
     return {"token": token, "username": username}
 
 
@@ -288,6 +308,54 @@ def get_avatar(username: str, _: str = Depends(current_user)):
         media_type="image/jpeg",
         headers={"Cache-Control": "private, no-cache"},
     )
+
+
+def touch_last_seen(username: str) -> None:
+    with closing(db()) as conn:
+        conn.execute("UPDATE users SET last_seen = ? WHERE username = ?", (time.time(), username))
+        conn.commit()
+
+
+class PrivacyIn(BaseModel):
+    hide_last_seen: bool
+
+
+@app.get("/api/privacy")
+def get_privacy(me: str = Depends(current_user)):
+    with closing(db()) as conn:
+        row = conn.execute("SELECT hide_last_seen FROM users WHERE username = ?", (me,)).fetchone()
+    return {"hide_last_seen": bool(row and row["hide_last_seen"])}
+
+
+@app.post("/api/privacy")
+async def set_privacy(body: PrivacyIn, me: str = Depends(current_user)):
+    with closing(db()) as conn:
+        conn.execute("UPDATE users SET hide_last_seen = ? WHERE username = ?", (1 if body.hide_last_seen else 0, me))
+        conn.commit()
+    await manager.announce_presence()  # makes every client refresh its friend list
+    return {"success": True}
+
+
+@app.get("/api/last-seen")
+def last_seen(me: str = Depends(current_user)):
+    """Last seen of the current user's FRIENDS only (respecting their privacy setting)."""
+    online = set(manager.online_users())
+    with closing(db()) as conn:
+        rows = conn.execute(
+            """SELECT u.username, u.last_seen, COALESCE(u.hide_last_seen, 0) AS hidden
+               FROM users u
+               JOIN friendships f ON f.status = 'accepted'
+                AND ((f.requester = ? AND f.addressee = u.username)
+                  OR (f.addressee = ? AND f.requester = u.username))""",
+            (me, me),
+        ).fetchall()
+    return {
+        r["username"]: {
+            "online": r["username"] in online,
+            "last_seen": None if r["hidden"] else r["last_seen"],
+        }
+        for r in rows
+    }
 
 
 class MessageEdit(BaseModel):
@@ -432,67 +500,6 @@ async def react_to_message(msg_id: int, body: ReactionIn, me: str = Depends(curr
     return {"reactions": reactions}
 
 
-def receipts_on(conn: sqlite3.Connection, username: str) -> bool:
-    """Read receipts are ON unless the user switched them off."""
-    row = conn.execute("SELECT read_receipts FROM profiles WHERE username = ?", (username,)).fetchone()
-    return row is None or row["read_receipts"] is None or row["read_receipts"] != 0
-
-
-def mark_dm_read(conn: sqlite3.Connection, me: str, partner: str):
-    """Mark messages `partner` sent to `me` as read. Returns (ids, ts).
-    Like WhatsApp, nothing is marked unless BOTH people have read receipts on."""
-    if not (receipts_on(conn, me) and receipts_on(conn, partner)):
-        return [], None
-    ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM messages WHERE room IS NULL AND sender = ? AND recipient = ? "
-        "AND read_at IS NULL AND deleted = 0", (partner, me))]
-    if not ids:
-        return [], None
-    ts = time.time()
-    marks = ",".join("?" * len(ids))
-    conn.execute(f"UPDATE messages SET read_at = ? WHERE id IN ({marks})", (ts, *ids))
-    conn.commit()
-    return ids, ts
-
-
-class SettingsIn(BaseModel):
-    read_receipts: bool
-
-
-@app.get("/api/settings")
-def get_settings(me: str = Depends(current_user)):
-    with closing(db()) as conn:
-        return {"read_receipts": receipts_on(conn, me)}
-
-
-@app.post("/api/settings")
-def update_settings(body: SettingsIn, me: str = Depends(current_user)):
-    with closing(db()) as conn:
-        conn.execute(
-            "INSERT INTO profiles(username, read_receipts) VALUES (?, ?) "
-            "ON CONFLICT(username) DO UPDATE SET read_receipts = excluded.read_receipts",
-            (me, 1 if body.read_receipts else 0),
-        )
-        conn.commit()
-    return {"read_receipts": body.read_receipts}
-
-
-class ReadIn(BaseModel):
-    partner: str
-
-
-@app.post("/api/read")
-async def mark_read(body: ReadIn, me: str = Depends(current_user)):
-    """The current user has opened / is looking at the DM with `partner`."""
-    with closing(db()) as conn:
-        if not are_friends(conn, me, body.partner):
-            raise HTTPException(403, "You can only read chats with friends")
-        ids, ts = mark_dm_read(conn, me, body.partner)
-    if ids:
-        await manager.send_to_users({body.partner}, {"type": "messages_read", "by": me, "ids": ids, "read_at": ts})
-    return {"marked": len(ids)}
-
-
 def row_to_message(r: sqlite3.Row) -> dict:
     return {
         "type": "message",
@@ -506,7 +513,6 @@ def row_to_message(r: sqlite3.Row) -> dict:
         "edited_at": r["edited_at"],
         "deleted": bool(r["deleted"]),
         "reply_to": r["reply_to"],
-        "read_at": r["read_at"],
     }
 
 
@@ -557,10 +563,6 @@ def history(
     msgs = [row_to_message(r) for r in rows]
     with closing(db()) as conn:
         attach_extras(conn, msgs)
-        show_receipts = bool(with_user) and not room and receipts_on(conn, me) and receipts_on(conn, with_user)
-    for m in msgs:
-        if not show_receipts or m["sender"] != me:
-            m["read_at"] = None
     return msgs
 
 
@@ -640,7 +642,7 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # ---------------------------------------------------------------- admin
-# NOTE: import name must match your file name exactly (Admin.py -> Admin, admin.py -> admin)
+# the file must be named admin.py (all lowercase) - Linux hosting is case-sensitive
 from Admin import make_router  # noqa: E402
 
 app.include_router(make_router(db, current_user, manager))
@@ -674,7 +676,6 @@ def save_message(room: str | None, sender: str, recipient: str | None, content: 
         "id": msg_id,
         "edited_at": None,
         "deleted": False,
-        "read_at": None,
         "reply_to": reply_to,
         "reply": reply,
         "reactions": {},
@@ -695,6 +696,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
         return
     await ws.accept()
     manager.conns[ws] = username
+    touch_last_seen(username)
     await manager.announce_presence()
     try:
         while True:
@@ -791,6 +793,8 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
         pass
     finally:
         manager.conns.pop(ws, None)
+        if username not in manager.conns.values():
+            touch_last_seen(username)  # last connection closed -> now is the last seen time
         await manager.announce_presence()
 
 

@@ -51,13 +51,14 @@
   <header>
     <h2>Admin Panel</h2>
     <input id="search" placeholder="Search users…">
+    <button class="btn ghost" id="backup">Download backup</button>
     <button class="btn ghost" id="refresh">Refresh</button>
     <button class="btn ghost" id="logout">Log out</button>
   </header>
   <div class="wrap">
     <div class="stats" id="stats"></div>
     <table>
-      <thead><tr><th>#</th><th>Username</th><th>Status</th><th>Bio / Avatar</th><th>Messages</th><th>Last message</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Username</th><th>Status</th><th>Bio / Avatar</th><th>Messages</th><th>Last message</th><th>Last online</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
 
@@ -125,6 +126,7 @@
       const bio = cell((u.avatar ? u.avatar + " · " : "") + (u.bio || "—")); bio.className = "bio";
       cell(u.msg_count);
       cell(u.last_message_ts ? new Date(u.last_message_ts * 1000).toLocaleString() : "—");
+      cell(u.online ? "Online now" : (u.last_online ? new Date(u.last_online * 1000).toLocaleString() : "—"));
       const act = document.createElement("td");
       const b = document.createElement("button");
       b.className = "del"; b.textContent = "Delete"; b.disabled = u.is_admin;
@@ -182,6 +184,18 @@
   $("go").onclick = login;
   $("p").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
   $("search").oninput = render;
+  $("backup").onclick = async () => {
+    try {
+      const res = await fetch("/api/admin/backup", { headers: { Authorization: "Bearer " + token } });
+      if (!res.ok) throw new Error("Backup failed (HTTP " + res.status + ")");
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "chat-backup-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".db";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } catch (e) { alert(e.message); }
+  };
   $("refresh").onclick = () => load().catch(e => alert(e.message));
   $("logout").onclick = () => { sessionStorage.removeItem("admin-token"); location.reload(); };
 

@@ -99,6 +99,15 @@
   .profile-card .gm-danger { background: var(--danger); margin-top: 14px; }
   #group-invited { font-size: 12px; color: var(--muted); }
   .head-btns { display: flex; gap: 6px; }
+  .item .txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+  .item .sub { font-size: 11px; color: var(--side-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .sub:empty { display: none; }
+  .item .sub.on { color: var(--mint); }
+  .item.active .sub, .item.active .sub.on { color: rgba(255,255,255,.9); }
+  .dm-status { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+  .dm-status.on { color: #1fae83; }
+  .profile-card .privacy-row { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 2px 0 12px; cursor: pointer; }
+  .profile-card .privacy-row input { width: auto; margin: 0; }
   .title-right { display: flex; align-items: center; gap: 8px; }
   #search-btn { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
   #search-btn:hover { border-color: var(--magenta); }
@@ -156,9 +165,6 @@
   .msg-container:hover .msg-actions { display: flex; }
   .msg-actions button { background: var(--panel); color: var(--text); border: 1px solid var(--border); cursor: pointer; font-size: 13px; padding: 4px 7px; border-radius: 8px; }
   .msg-actions button:hover { border-color: var(--magenta); }
-  .seen-label { align-self: flex-end; margin: -6px 4px 0 0; font-size: 11px; font-weight: 600; color: var(--muted); }
-  .ticks { margin-left: 6px; font-size: 12px; letter-spacing: -2px; color: rgba(255,255,255,.65); font-weight: 700; }
-  .ticks.seen { color: #7dffd8; text-shadow: 0 1px 2px rgba(0,0,0,.25); }
   .edited-label { font-size: 10px; color: var(--muted); font-style: italic; margin-top: 3px; }
   .image-preview { max-width: 220px; max-height: 220px; border-radius: 12px; display: block; }
 
@@ -294,10 +300,10 @@
     </div>
     <input id="profile-bio" placeholder="Bio (max 500 chars)" maxlength="500">
     <textarea id="profile-avatar" placeholder="Status emoji or short text (optional)"></textarea>
+    <label class="privacy-row"><input type="checkbox" id="hide-last-seen"> Hide my "last seen" from friends</label>
     <button id="save-profile">Save Profile</button>
     <button id="open-password" style="background: var(--night-3); margin-top: 8px;">Change password</button>
     <button id="theme-btn" type="button" style="background: var(--night-3); margin-top: 8px;">Switch to dark mode</button>
-    <button id="receipts-btn" type="button" style="background: var(--night-3); margin-top: 8px;">Read receipts: On</button>
     <button id="close-profile" style="background: var(--muted); margin-top: 8px;">Close</button>
   </div>
 </div>
@@ -473,12 +479,13 @@
 
   // ------------------------------------------------------------ sidebar
   async function refreshLists() {
-    const [rooms, users, requests, blocked, ginvites] = await Promise.all([
+    const [rooms, users, requests, blocked, ginvites, lastSeen] = await Promise.all([
       api("/api/rooms"), api("/api/users"), api("/api/friends/requests"), api("/api/friends/blocked"),
-      api("/api/group-invites"),
+      api("/api/group-invites"), api("/api/last-seen"),
     ]);
     state.rooms = rooms; state.users = users; state.requests = requests; state.blocked = blocked;
     state.ginvites = ginvites;
+    state.lastSeen = lastSeen;
 
     // if the open DM is no longer a friend (or the group is gone / we were removed), close it
     const lostDm = state.current && state.current.kind === "dm" && !users.includes(state.current.name);
@@ -504,7 +511,16 @@
       const d = document.createElement("span"); d.className = "dot" + (online ? " on" : "");
       a.appendChild(d); el.appendChild(a);
     }
-    const l = document.createElement("span"); l.className = "label"; l.textContent = label; el.appendChild(l);
+    const l = document.createElement("span"); l.className = "label"; l.textContent = label;
+    if (withDot) {
+      const box = document.createElement("div"); box.className = "txt";
+      const sub = document.createElement("span"); sub.className = "sub";
+      sub.textContent = presenceText(label);
+      if (state.online.has(label)) sub.classList.add("on");
+      box.append(l, sub); el.appendChild(box);
+    } else {
+      el.appendChild(l);
+    }
     return el;
   }
 
@@ -583,6 +599,7 @@
     }
     updateChatActions();
     updateTitle();
+    updateDmStatus();
   }
 
   async function friendAction(action, username) {
@@ -754,6 +771,7 @@
     renderSidebar();
     $("chat-title-text").textContent = kind === "room" ? "# " + name : name;
     if (kind === "dm") $("chat-title-text").prepend(avatarEl(name, 28));
+    updateDmStatus();
     updateChatActions();
     $("composer").classList.remove("hidden");
     $("messages").replaceChildren();
@@ -763,9 +781,7 @@
       if (!state.current || state.current.key !== key) return;
       if (!history.length) showEmpty();
       history.forEach(appendMessage);
-      updateSeenLabel();
       scrollDown();
-      markRead();
     } catch (e) { /* ignore */ }
     $("text").focus();
   }
@@ -788,7 +804,6 @@
     const meta = document.createElement("div"); meta.className = "meta";
     meta.textContent = (mine ? "You" : m.sender) + " · " +
       new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    if (mine && m.kind === "dm") meta.appendChild(ticksEl(m.id, m.read_at));
     el.appendChild(meta);
 
     if (m.reply) {
@@ -863,48 +878,6 @@
     $("messages").appendChild(container);
   }
 
-  // ------------------------------------------------------------ Seen / read receipts
-  function ticksEl(id, readAt) {
-    const t = document.createElement("span");
-    t.id = "ticks-" + id;
-    setTicks(t, readAt);
-    return t;
-  }
-  function setTicks(t, readAt) {
-    t.className = "ticks" + (readAt ? " seen" : "");
-    t.dataset.read = readAt || "";
-    t.textContent = readAt ? " ✓✓" : " ✓";
-    t.title = readAt ? "Seen " + new Date(readAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Sent";
-  }
-  // "Seen 02:25 PM" line under the latest message the friend has read
-  function seenText(readAt) {
-    const d = new Date(readAt * 1000);
-    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    return d.toDateString() === new Date().toDateString()
-      ? "Seen " + time
-      : "Seen " + d.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + time;
-  }
-  function updateSeenLabel() {
-    document.querySelectorAll("#messages .seen-label").forEach((n) => n.remove());
-    const seen = document.querySelectorAll("#messages .ticks.seen");
-    if (!seen.length) return;
-    const last = seen[seen.length - 1];
-    const container = last.closest(".msg-container");
-    if (!container) return;
-    const label = document.createElement("div");
-    label.className = "seen-label";
-    label.textContent = seenText(Number(last.dataset.read));
-    container.after(label);
-  }
-  // tell the server the person is looking at this DM (it marks their messages as read)
-  function markRead() {
-    const c = state.current;
-    if (!c || c.kind !== "dm" || document.visibilityState !== "visible") return;
-    api("/api/read", "POST", { partner: c.name }).catch(() => {});
-  }
-  document.addEventListener("visibilitychange", markRead);
-  window.addEventListener("focus", markRead);
-
   function scrollDown() { const m = $("messages"); m.scrollTop = m.scrollHeight; }
 
   // ------------------------------------------------------------ emoji picker
@@ -954,10 +927,8 @@
     const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
     state.ws = ws;
     ws.onopen = () => { $("status").textContent = "Connected"; };
-    ws.onclose = (ev) => {
+    ws.onclose = () => {
       if (!state.token) return;
-      // 4401 = token revoked (account deleted, password reset or forced logout by admin)
-      if (ev && ev.code === 4401) { logout(); return; }
       $("status").textContent = "Disconnected. Reconnecting…";
       setTimeout(() => { if (state.token) connect(); }, 2000);
     };
@@ -988,10 +959,7 @@
       } else if (m.type === "message") {
         const key = m.kind === "room" ? "room:" + m.room
           : "dm:" + (m.sender === state.me ? m.recipient : m.sender);
-        if (state.current && state.current.key === key) {
-          if (!state.viewingOld) { appendMessage(m); scrollDown(); }
-          if (m.sender !== state.me) markRead();
-        }
+        if (state.current && state.current.key === key) { if (!state.viewingOld) { appendMessage(m); scrollDown(); } }
         else if (m.sender !== state.me) { state.unread.add(key); renderSidebar(); }
         if (m.sender !== state.me) notifyIncoming(m, key);
       } else if (m.type === "message_edited") {
@@ -1007,12 +975,9 @@
             msgEl.appendChild(editedLabel);
           }
         }
-      } else if (m.type === "messages_read") {
-        for (const id of m.ids || []) { const t = $("ticks-" + id); if (t) setTicks(t, m.read_at); }
-        updateSeenLabel();
       } else if (m.type === "message_deleted") {
         const container = $("msg-" + m.id)?.parentElement;
-        if (container) { container.remove(); updateSeenLabel(); }
+        if (container) container.remove();
       }
     };
   }
@@ -1050,6 +1015,7 @@
     $("profile-bio").value = prof.bio;
     $("profile-avatar").value = prof.avatar;
     $("profile-photo").replaceChildren(avatarEl(state.me, 84));
+    try { const p = await api("/api/privacy"); $("hide-last-seen").checked = !!p.hide_last_seen; } catch (_) {}
     $("profile-modal").classList.add("show");
   };
 
@@ -1142,6 +1108,46 @@
   $("save-edit").onclick = saveEditMsg;
   $("cancel-edit").onclick = () => $("edit-modal").classList.remove("show");
 
+
+  // ------------------------------------------------------------ Last seen
+  function fmtLastSeen(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000), now = new Date();
+    const mins = Math.floor((now - d) / 60000);
+    if (mins < 1) return "last seen just now";
+    if (mins < 60) return "last seen " + mins + " min ago";
+    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const diffDays = Math.round((today - day) / 86400000);
+    if (diffDays <= 0) return "last seen today at " + time;
+    if (diffDays === 1) return "last seen yesterday at " + time;
+    return "last seen " + d.toLocaleDateString([], { day: "numeric", month: "short" }) + " at " + time;
+  }
+
+  function presenceText(username) {
+    if (state.online.has(username)) return "online";
+    const info = state.lastSeen && state.lastSeen[username];
+    return info ? fmtLastSeen(info.last_seen) : "";
+  }
+
+  function updateDmStatus() {
+    const c = state.current;
+    let el = $("dm-status");
+    if (!c || c.kind !== "dm") { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement("small"); el.id = "dm-status"; $("chat-title-text").appendChild(el); }
+    el.textContent = presenceText(c.name);
+    el.className = "dm-status" + (state.online.has(c.name) ? " on" : "");
+  }
+
+  $("hide-last-seen").onchange = async (e) => {
+    const box = e.target, want = box.checked;
+    try { await api("/api/privacy", "POST", { hide_last_seen: want }); }
+    catch (err) { box.checked = !want; alert(err.message); }
+  };
+
+  // keep "5 min ago" style texts fresh
+  setInterval(() => { if (state.token) { renderSidebar(); } }, 60000);
 
   // ------------------------------------------------------------ Search (inside the open chat)
   let searchTimer = null;
@@ -1236,23 +1242,6 @@
     try { localStorage.setItem("chat-theme", isDark ? "dark" : "light"); } catch (_) {}
     applyTheme();
   };
-
-  // ------------------------------------------------------------ Read receipts setting
-  state.receipts = true;
-  function showReceiptsState() { $("receipts-btn").textContent = "Read receipts: " + (state.receipts ? "On" : "Off"); }
-  async function loadSettings() {
-    try { state.receipts = (await api("/api/settings")).read_receipts; } catch (_) {}
-    showReceiptsState();
-  }
-  $("receipts-btn").onclick = async () => {
-    try {
-      state.receipts = (await api("/api/settings", "POST", { read_receipts: !state.receipts })).read_receipts;
-      showReceiptsState();
-      const c = state.current;
-      if (c && c.kind === "dm") openChat(c.kind, c.name);   // reload so ticks show / hide, and mark read if turned on
-    } catch (e) { alert(e.message); }
-  };
-  $("me-name").addEventListener("click", loadSettings);
 
   // ------------------------------------------------------------ Profile photo
   $("me-avatar").onclick = () => $("me-name").click();
