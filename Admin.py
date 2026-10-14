@@ -17,7 +17,7 @@ from starlette.background import BackgroundTask
 
 from groups import cleanup_user
 
-ADMINS = {u.strip() for u in os.environ.get("ADMIN_USERS", "hethee").split(",") if u.strip()}
+ADMINS = {u.strip() for u in os.environ.get("ADMIN_USERS", "admin").split(",") if u.strip()}
 PROTECTED_ROOMS = {"general"}  # the admin panel will not delete these
 
 
@@ -82,6 +82,7 @@ def make_router(db, current_user, manager) -> APIRouter:
             conn.execute("DELETE FROM blocks WHERE blocker = ? OR blocked = ?", (username, username))
             conn.execute("DELETE FROM reactions WHERE username = ?", (username,))
             cleanup_user(conn, username)  # group memberships / invites / owned groups
+            conn.execute("DELETE FROM voice_notes WHERE message_id IN (SELECT id FROM messages WHERE sender = ?)", (username,))
             # hide their messages (and DMs sent to them)
             conn.execute(
                 "UPDATE messages SET deleted = 1 "
@@ -186,6 +187,7 @@ def make_router(db, current_user, manager) -> APIRouter:
             conn.execute("DELETE FROM rooms WHERE name = ?", (name,))
             conn.execute("DELETE FROM room_members WHERE room = ?", (name,))
             conn.execute("DELETE FROM room_invites WHERE room = ?", (name,))
+            conn.execute("DELETE FROM voice_notes WHERE message_id IN (SELECT id FROM messages WHERE room = ?)", (name,))
             conn.execute("UPDATE messages SET deleted = 1 WHERE room = ?", (name,))
             conn.commit()
         await manager.broadcast({"type": "groups_updated"})

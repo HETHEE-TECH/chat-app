@@ -94,6 +94,7 @@ def _delete_room(conn: sqlite3.Connection, name: str) -> None:
     conn.execute("DELETE FROM rooms WHERE name = ?", (name,))
     conn.execute("DELETE FROM room_members WHERE room = ?", (name,))
     conn.execute("DELETE FROM room_invites WHERE room = ?", (name,))
+    conn.execute("DELETE FROM voice_notes WHERE message_id IN (SELECT id FROM messages WHERE room = ?)", (name,))
     conn.execute("UPDATE messages SET deleted = 1 WHERE room = ?", (name,))
 
 

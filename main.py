@@ -28,6 +28,9 @@ DB_PATH = os.environ.get("CHAT_DB", str(BASE_DIR / "chat.db"))
 MAX_MESSAGE_LEN = 2000
 MAX_IMAGE_LEN = 1_500_000  # base64 characters (~1 MB)
 MAX_PHOTO_LEN = 400_000  # profile photo, base64 characters (~300 KB)
+MAX_VOICE_BYTES = 2_500_000  # one voice message (about 2 minutes)
+MAX_VOICE_SEC = 120
+ALLOWED_VOICE_MIMES = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/aac", "audio/x-m4a")
 HISTORY_LIMIT = 100
 NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{3,20}$")
 
@@ -81,6 +84,11 @@ def init_db() -> None:
                 emoji TEXT NOT NULL,
                 PRIMARY KEY (message_id, username, emoji)
             );
+            CREATE TABLE IF NOT EXISTS voice_notes (
+                message_id INTEGER PRIMARY KEY,
+                mime TEXT NOT NULL,
+                data BLOB NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_msg_room ON messages(room, id);
             CREATE INDEX IF NOT EXISTS idx_msg_dm ON messages(sender, recipient, id);
             """
@@ -95,6 +103,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN has_image INTEGER DEFAULT 0")
         if "reply_to" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER DEFAULT NULL")
+        if "media" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN media TEXT DEFAULT NULL")
         ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
         if "last_seen" not in ucols:
             conn.execute("ALTER TABLE users ADD COLUMN last_seen REAL")
@@ -358,6 +368,81 @@ def last_seen(me: str = Depends(current_user)):
     }
 
 
+def can_view_message(conn: sqlite3.Connection, row, me: str) -> bool:
+    if row["room"]:
+        return can_access_room(conn, row["room"], me)
+    other = row["recipient"] if row["sender"] == me else row["sender"]
+    return me in (row["sender"], row["recipient"]) and are_friends(conn, me, other)
+
+
+class VoiceIn(BaseModel):
+    audio: str
+    mime: str
+    duration: float
+    room: str | None = None
+    to: str | None = None
+    reply_to: int | None = None
+
+
+@app.post("/api/voice")
+async def send_voice(body: VoiceIn, me: str = Depends(current_user)):
+    base_mime = body.mime.split(";")[0].strip().lower()
+    if base_mime not in ALLOWED_VOICE_MIMES:
+        raise HTTPException(400, "Unsupported audio format")
+    duration = min(float(body.duration), MAX_VOICE_SEC + 5)
+    if duration < 0.5:
+        raise HTTPException(400, "Voice message is too short")
+    try:
+        raw = base64.b64decode(body.audio, validate=True)
+    except Exception:
+        raise HTTPException(400, "Invalid audio data")
+    if not raw or len(raw) > MAX_VOICE_BYTES:
+        raise HTTPException(400, "Voice message is too large (max about 2 minutes)")
+
+    room = to = None
+    with closing(db()) as conn:
+        if body.room:
+            if not can_access_room(conn, body.room, me):
+                raise HTTPException(403, "You are not a member of this group")
+            room = body.room
+            reply_to = valid_reply_id(conn, body.reply_to, room, me, None)
+        elif body.to:
+            if not are_friends(conn, me, body.to):
+                raise HTTPException(403, "You can only message friends")
+            to = body.to
+            reply_to = valid_reply_id(conn, body.reply_to, None, me, to)
+        else:
+            raise HTTPException(400, "Provide 'room' or 'to'")
+
+    msg = save_message(room, me, to, str(int(round(duration))), reply_to, "voice")
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT INTO voice_notes(message_id, mime, data) VALUES (?, ?, ?)", (msg["id"], base_mime, raw)
+        )
+        conn.commit()
+    if room:
+        await send_to_room(room, msg)
+    else:
+        await manager.send_to_users({me, to}, msg)
+    return {"success": True, "id": msg["id"]}
+
+
+@app.get("/api/voice/{msg_id}")
+def get_voice(msg_id: int, me: str = Depends(current_user)):
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT room, sender, recipient, deleted, media FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if not row or row["deleted"] or row["media"] != "voice":
+            raise HTTPException(404, "Voice message not found")
+        if not can_view_message(conn, row, me):
+            raise HTTPException(403, "You cannot access this message")
+        v = conn.execute("SELECT mime, data FROM voice_notes WHERE message_id = ?", (msg_id,)).fetchone()
+    if not v:
+        raise HTTPException(404, "Voice message not found")
+    return Response(content=bytes(v["data"]), media_type=v["mime"], headers={"Cache-Control": "private, max-age=86400"})
+
+
 class MessageEdit(BaseModel):
     content: str
 
@@ -373,6 +458,8 @@ async def edit_message(msg_id: int, edit: MessageEdit, me: str = Depends(current
             raise HTTPException(404, "Message not found")
         if row["sender"] != me:
             raise HTTPException(403, "Can only edit your own messages")
+        if conn.execute("SELECT media FROM messages WHERE id = ?", (msg_id,)).fetchone()["media"]:
+            raise HTTPException(400, "Voice messages cannot be edited")
         edited_at = time.time()
         conn.execute("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
                     (content, edited_at, msg_id))
@@ -394,6 +481,7 @@ async def delete_message(msg_id: int, me: str = Depends(current_user)):
         if row["sender"] != me:
             raise HTTPException(403, "Can only delete your own messages")
         conn.execute("UPDATE messages SET deleted = 1 WHERE id = ?", (msg_id,))
+        conn.execute("DELETE FROM voice_notes WHERE message_id = ?", (msg_id,))
         conn.commit()
     payload = {"type": "message_deleted", "id": msg_id}
     if row["room"]:
@@ -411,11 +499,14 @@ class ReactionIn(BaseModel):
 
 
 def reply_preview(conn: sqlite3.Connection, rid: int) -> dict:
-    row = conn.execute("SELECT sender, content, deleted FROM messages WHERE id = ?", (rid,)).fetchone()
+    row = conn.execute("SELECT sender, content, deleted, media FROM messages WHERE id = ?", (rid,)).fetchone()
     if not row or row["deleted"]:
         return {"id": rid, "sender": "", "snippet": "", "deleted": True}
     content = row["content"]
-    snippet = "\U0001F4F7 Photo" if content.startswith(("/9j/", "iVBO")) else content[:80]
+    if row["media"] == "voice":
+        snippet = "\U0001F3A4 Voice message"
+    else:
+        snippet = "\U0001F4F7 Photo" if content.startswith(("/9j/", "iVBO")) else content[:80]
     return {"id": rid, "sender": row["sender"], "snippet": snippet, "deleted": False}
 
 
@@ -513,6 +604,7 @@ def row_to_message(r: sqlite3.Row) -> dict:
         "edited_at": r["edited_at"],
         "deleted": bool(r["deleted"]),
         "reply_to": r["reply_to"],
+        "media": r["media"],
     }
 
 
@@ -593,7 +685,7 @@ def search_messages(
         clause, params = _conv_clause(room, with_user, me)
         rows = conn.execute(
             f"SELECT id, sender, content, ts FROM messages WHERE {clause} AND deleted = 0 "
-            "AND content NOT LIKE '/9j/%' AND content NOT LIKE 'iVBO%' "
+            "AND media IS NULL AND content NOT LIKE '/9j/%' AND content NOT LIKE 'iVBO%' "
             "AND content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 50",
             (*params, "%" + _like_escape(needle) + "%"),
         ).fetchall()
@@ -661,12 +753,12 @@ async def send_to_room(room: str, payload: dict) -> None:
 
 
 def save_message(room: str | None, sender: str, recipient: str | None, content: str,
-                 reply_to: int | None = None) -> dict:
+                 reply_to: int | None = None, media: str | None = None) -> dict:
     ts = time.time()
     with closing(db()) as conn:
         cur = conn.execute(
-            "INSERT INTO messages(room, sender, recipient, content, ts, reply_to) VALUES (?, ?, ?, ?, ?, ?)",
-            (room, sender, recipient, content, ts, reply_to),
+            "INSERT INTO messages(room, sender, recipient, content, ts, reply_to, media) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (room, sender, recipient, content, ts, reply_to, media),
         )
         conn.commit()
         msg_id = cur.lastrowid
@@ -677,6 +769,7 @@ def save_message(room: str | None, sender: str, recipient: str | None, content: 
         "edited_at": None,
         "deleted": False,
         "reply_to": reply_to,
+        "media": media,
         "reply": reply,
         "reactions": {},
         "kind": "room" if room else "dm",
@@ -765,7 +858,10 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
                 if msg_id and new_content:
                     with closing(db()) as conn:
                         row = conn.execute("SELECT sender, room, recipient FROM messages WHERE id = ?", (msg_id,)).fetchone()
-                        if row and row["sender"] == username:
+                        is_voice = bool(row) and bool(
+                            conn.execute("SELECT media FROM messages WHERE id = ?", (msg_id,)).fetchone()["media"]
+                        )
+                        if row and row["sender"] == username and not is_voice:
                             edited_at = time.time()
                             conn.execute("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
                                         (new_content, edited_at, msg_id))
@@ -783,6 +879,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
                         row = conn.execute("SELECT sender, room, recipient FROM messages WHERE id = ?", (msg_id,)).fetchone()
                         if row and row["sender"] == username:
                             conn.execute("UPDATE messages SET deleted = 1 WHERE id = ?", (msg_id,))
+                            conn.execute("DELETE FROM voice_notes WHERE message_id = ?", (msg_id,))
                             conn.commit()
                             payload = {"type": "message_deleted", "id": msg_id}
                             if row["room"]:

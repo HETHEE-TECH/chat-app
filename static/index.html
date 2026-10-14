@@ -99,6 +99,23 @@
   .profile-card .gm-danger { background: var(--danger); margin-top: 14px; }
   #group-invited { font-size: 12px; color: var(--muted); }
   .head-btns { display: flex; gap: 6px; }
+  .voice { display: flex; align-items: center; gap: 10px; min-width: 200px; }
+  .voice .vp-btn { border: 0; width: 34px; height: 34px; border-radius: 50%; background: var(--magenta); color: #fff; cursor: pointer; font-size: 13px; flex: none; }
+  .msg.mine .voice .vp-btn { background: rgba(255,255,255,.95); color: var(--magenta); }
+  .voice .vp-track { flex: 1; height: 6px; border-radius: 3px; background: rgba(120,120,160,.3); cursor: pointer; position: relative; }
+  .voice .vp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: var(--magenta); }
+  .msg.mine .voice .vp-track { background: rgba(255,255,255,.35); }
+  .msg.mine .voice .vp-fill { background: #fff; }
+  .voice .vp-time { font-size: 12px; min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+  #rec-bar { display: flex; align-items: center; gap: 10px; padding: 10px 24px; background: var(--panel); border-top: 1px solid var(--border); font-size: 14px; }
+  #rec-bar .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: recblink 1s infinite; }
+  @keyframes recblink { 50% { opacity: .2; } }
+  #rec-bar .rec-time { flex: 1; font-variant-numeric: tabular-nums; }
+  #rec-bar button { border: 0; border-radius: 999px; padding: 8px 16px; cursor: pointer; font-weight: 700; }
+  #rec-cancel { background: var(--mist); color: var(--text); }
+  #rec-send { background: var(--sunset); color: #fff; }
+  #mic-btn { background: none; border: 0; font-size: 21px; cursor: pointer; padding: 6px; border-radius: 50%; }
+  #mic-btn:hover { background: var(--mist); }
   .item .txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
   .item .sub { font-size: 11px; color: var(--side-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .item .sub:empty { display: none; }
@@ -276,9 +293,11 @@
     <div id="messages"><div class="empty">Pick a conversation to start chatting.</div></div>
     <div class="typing-indicator" id="typing-ind"></div>
     <div id="reply-bar" class="hidden"><span id="reply-text"></span><button id="reply-cancel" type="button" title="Cancel reply">✕</button></div>
+    <div id="rec-bar" class="hidden"><span class="rec-dot"></span><span class="rec-time" id="rec-time">0:00</span><button id="rec-cancel" type="button">Cancel</button><button id="rec-send" type="button">Send</button></div>
     <form id="composer" class="hidden" style="position: relative;">
       <input id="text" type="text" placeholder="Type a message…" autocomplete="off" maxlength="2000">
       <input type="file" id="image-input" accept="image/*">
+      <button id="mic-btn" type="button" title="Record a voice message">🎤</button>
       <button id="image-btn" type="button" title="Share image">📸</button>
       <button id="emoji-btn" type="button" title="Emoji">😊</button>
       <button type="submit">Send</button>
@@ -765,6 +784,7 @@
     state.current = { kind, name, key };
     state.unread.delete(key);
     clearReply();
+    cancelRecording();
     state.viewingOld = false;
     $("jump-bar").classList.add("hidden");
     closeSearch();
@@ -824,7 +844,10 @@
 
     const content = String(m.content || "");
     const isImage = content.startsWith("/9j/") || content.startsWith("iVBO");
-    if (isImage) {
+    const isVoice = m.media === "voice";
+    if (isVoice) {
+      el.appendChild(buildVoicePlayer(m));
+    } else if (isImage) {
       const img = document.createElement("img");
       img.className = "image-preview";
       img.src = "data:image/" + (content.startsWith("iVBO") ? "png" : "jpeg") + ";base64," + content;
@@ -849,7 +872,7 @@
 
     const replyBtn = document.createElement("button");
     replyBtn.textContent = "↩️"; replyBtn.title = "Reply"; replyBtn.type = "button";
-    replyBtn.onclick = (e) => { e.preventDefault(); setReply({ id: m.id, sender: m.sender, snippet: isImage ? "📷 Photo" : content.slice(0, 80) }); };
+    replyBtn.onclick = (e) => { e.preventDefault(); setReply({ id: m.id, sender: m.sender, snippet: isVoice ? "🎤 Voice message" : isImage ? "📷 Photo" : content.slice(0, 80) }); };
     const reactBtn = document.createElement("button");
     reactBtn.textContent = "😀"; reactBtn.title = "React"; reactBtn.type = "button";
     const bar = document.createElement("div"); bar.className = "react-bar";
@@ -862,7 +885,7 @@
     actions.append(replyBtn, reactBtn, bar);
 
     if (mine) {
-      if (!isImage) {
+      if (!isImage && !isVoice) {
         const editBtn = document.createElement("button");
         editBtn.textContent = "✏️"; editBtn.title = "Edit"; editBtn.type = "button";
         editBtn.onclick = (e) => { e.preventDefault(); openEditModal({ id: m.id, content: el.querySelector(".msg-body").textContent }); };
@@ -1108,6 +1131,124 @@
   $("save-edit").onclick = saveEditMsg;
   $("cancel-edit").onclick = () => $("edit-modal").classList.remove("show");
 
+
+  // ------------------------------------------------------------ Voice messages
+  const MAX_VOICE_SEC = 120;
+  let rec = null;            // the recording in progress
+  let currentVoice = null;   // the audio element that is playing now
+
+  const fmtDur = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+
+  function pickMime() {
+    const list = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+    return list.find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+  }
+
+  if (!navigator.mediaDevices || !window.MediaRecorder) $("mic-btn").classList.add("hidden");
+
+  async function startRecording() {
+    if (rec || !state.current) return;
+    const c = state.current;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (_) { alert("Please allow microphone access to record voice messages."); return; }
+    const mime = pickMime();
+    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : { audioBitsPerSecond: 32000 });
+    const r = { recorder, stream, chunks: [], start: Date.now(), cancelled: false, target: { kind: c.kind, name: c.name }, timer: null };
+    rec = r;
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) r.chunks.push(e.data); };
+    recorder.onstop = () => finishRecording(r);
+    recorder.start();
+    $("rec-bar").classList.remove("hidden");
+    $("rec-time").textContent = "0:00";
+    r.timer = setInterval(() => {
+      const secs = (Date.now() - r.start) / 1000;
+      $("rec-time").textContent = fmtDur(secs);
+      if (secs >= MAX_VOICE_SEC) stopRecording(false);
+    }, 250);
+  }
+
+  function stopRecording(cancel) {
+    const r = rec;
+    if (!r) return;
+    r.cancelled = !!cancel;
+    clearInterval(r.timer);
+    $("rec-bar").classList.add("hidden");
+    try {
+      if (r.recorder.state !== "inactive") r.recorder.stop(); else finishRecording(r);
+    } catch (_) { finishRecording(r); }
+  }
+
+  function cancelRecording() { if (rec) stopRecording(true); }
+
+  async function finishRecording(r) {
+    if (rec !== r) return;      // already handled
+    rec = null;
+    r.stream.getTracks().forEach((t) => t.stop());
+    if (r.cancelled || !r.chunks.length) return;
+    const seconds = (Date.now() - r.start) / 1000;
+    if (seconds < 1) { alert("Voice message is too short."); return; }
+    const type = (r.recorder.mimeType || "audio/webm").split(";")[0];
+    const blob = new Blob(r.chunks, { type });
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader(); fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsDataURL(blob);
+    });
+    const body = { audio: String(dataUrl).split(",")[1], mime: type, duration: seconds };
+    if (r.target.kind === "room") body.room = r.target.name; else body.to = r.target.name;
+    if (state.replyTo) { body.reply_to = state.replyTo.id; clearReply(); }
+    try { await api("/api/voice", "POST", body); } catch (e) { alert(e.message); }
+  }
+
+  $("mic-btn").onclick = startRecording;
+  $("rec-cancel").onclick = () => stopRecording(true);
+  $("rec-send").onclick = () => stopRecording(false);
+
+  function buildVoicePlayer(m) {
+    const total = Math.max(1, parseInt(m.content, 10) || 1);
+    const wrap = document.createElement("div"); wrap.className = "voice";
+    const btn = document.createElement("button"); btn.type = "button"; btn.className = "vp-btn"; btn.textContent = "▶";
+    const track = document.createElement("div"); track.className = "vp-track";
+    const fill = document.createElement("div"); fill.className = "vp-fill"; track.appendChild(fill);
+    const time = document.createElement("span"); time.className = "vp-time"; time.textContent = fmtDur(total);
+    wrap.append(btn, track, time);
+
+    let audio = null;
+    const lengthOf = (a) => (isFinite(a.duration) && a.duration > 0 ? a.duration : total);
+
+    async function ensureAudio() {
+      if (audio) return audio;
+      const res = await fetch("/api/voice/" + m.id, { headers: { Authorization: "Bearer " + state.token } });
+      if (!res.ok) throw new Error("This voice message is not available.");
+      audio = new Audio(URL.createObjectURL(await res.blob()));
+      audio.onplay = () => { btn.textContent = "⏸"; };
+      audio.onpause = () => { btn.textContent = "▶"; };
+      audio.onended = () => { btn.textContent = "▶"; fill.style.width = "0%"; time.textContent = fmtDur(total); };
+      audio.ontimeupdate = () => {
+        fill.style.width = Math.min(100, (audio.currentTime / lengthOf(audio)) * 100) + "%";
+        time.textContent = fmtDur(audio.currentTime);
+      };
+      return audio;
+    }
+
+    btn.onclick = async (e) => {
+      e.preventDefault();
+      try {
+        const a = await ensureAudio();
+        if (!a.paused) { a.pause(); return; }
+        if (currentVoice && currentVoice !== a) currentVoice.pause();
+        currentVoice = a;
+        await a.play();
+      } catch (err) { alert(err.message); }
+    };
+    track.onclick = async (e) => {
+      try {
+        const a = await ensureAudio();
+        const box = track.getBoundingClientRect();
+        a.currentTime = Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)) * lengthOf(a);
+      } catch (err) { alert(err.message); }
+    };
+    return wrap;
+  }
 
   // ------------------------------------------------------------ Last seen
   function fmtLastSeen(ts) {
@@ -1370,7 +1511,7 @@
       const title = m.kind === "room" ? "# " + m.room + " · " + m.sender : m.sender;
       try {
         const n = new Notification(title, {
-          body: isImage ? "📷 Photo" : content.slice(0, 120),
+          body: m.media === "voice" ? "🎤 Voice message" : isImage ? "📷 Photo" : content.slice(0, 120),
           icon: "/static/icons/icon-192.png",
           tag: key,
         });
