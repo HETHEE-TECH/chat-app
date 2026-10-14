@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Panel</title>
+<style>
+  :root { --night:#15183a; --mist:#eef0fb; --border:#dfe2f3; --text:#1a1d3a; --muted:#7a7fa3;
+          --mint:#2fd6a1; --danger:#e5484d; --sunset:linear-gradient(135deg,#e8457c,#ff7a59 55%,#ffb347); }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"DM Sans",system-ui,sans-serif; background:var(--mist); color:var(--text); }
+  .hidden { display:none !important; }
+  button,input { font:inherit; }
+  #login { min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--night); padding:16px; }
+  .card { background:#fff; border-radius:18px; padding:30px; width:100%; max-width:360px; }
+  .card h1 { margin:0 0 16px; }
+  .card input { width:100%; padding:12px; margin-bottom:10px; border:1.5px solid var(--border); border-radius:10px; }
+  .btn { padding:10px 18px; border:0; border-radius:10px; background:var(--sunset); color:#fff; font-weight:700; cursor:pointer; }
+  .card .btn { width:100%; }
+  #err { color:var(--danger); font-size:13px; min-height:18px; margin-bottom:8px; }
+  header { background:var(--night); color:#fff; padding:16px 24px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h2 { margin:0; flex:1; }
+  header input { padding:9px 14px; border-radius:999px; border:0; min-width:200px; }
+  .ghost { background:rgba(255,255,255,.12); }
+  .wrap { padding:20px 24px; overflow-x:auto; }
+  .stats { margin-bottom:12px; color:var(--muted); font-size:14px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 2px 10px rgba(30,35,90,.08); }
+  th,td { padding:12px 14px; text-align:left; border-bottom:1px solid var(--border); font-size:14px; vertical-align:top; }
+  th { background:#f6f7fd; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:#c4c7de; margin-right:6px; }
+  .dot.on { background:var(--mint); }
+  .tag { font-size:11px; background:var(--night); color:#fff; padding:2px 8px; border-radius:999px; margin-left:6px; }
+  .del { background:var(--danger); color:#fff; border:0; padding:7px 12px; border-radius:8px; cursor:pointer; font-weight:600; }
+  .del:disabled { opacity:.35; cursor:not-allowed; }
+  .bio { max-width:260px; word-break:break-word; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<section id="login">
+  <div class="card">
+    <h1>Admin Login</h1>
+    <div id="err"></div>
+    <input id="u" placeholder="Admin username" autocomplete="username">
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="btn" id="go">Log in</button>
+  </div>
+</section>
+
+<section id="panel" class="hidden">
+  <header>
+    <h2>Admin Panel</h2>
+    <input id="search" placeholder="Search users…">
+    <button class="btn ghost" id="refresh">Refresh</button>
+    <button class="btn ghost" id="logout">Log out</button>
+  </header>
+  <div class="wrap">
+    <div class="stats" id="stats"></div>
+    <table>
+      <thead><tr><th>#</th><th>Username</th><th>Status</th><th>Bio / Avatar</th><th>Messages</th><th>Last message</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <h3 style="margin:30px 0 10px">Rooms &amp; Groups</h3>
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Owner</th><th>Members</th><th>Messages</th><th></th></tr></thead>
+      <tbody id="room-rows"></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let token = null, users = [], rooms = [];
+
+  async function api(path, method = "GET", body) {
+    const res = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(data.detail || ("Request failed (HTTP " + res.status + ")")), { status: res.status });
+    return data;
+  }
+
+  async function login() {
+    $("err").textContent = "";
+    try {
+      const d = await api("/api/login", "POST", { username: $("u").value, password: $("p").value });
+      token = d.token;
+      await load();
+      sessionStorage.setItem("admin-token", token);
+      $("login").classList.add("hidden");
+      $("panel").classList.remove("hidden");
+    } catch (e) {
+      token = null;
+      $("err").textContent = e.status === 403 ? "This account is not an admin." : e.message;
+    }
+  }
+
+  async function load() {
+    users = await api("/api/admin/users");
+    rooms = await api("/api/admin/rooms");
+    render();
+    renderRooms();
+  }
+
+  function render() {
+    const q = $("search").value.trim().toLowerCase();
+    const list = users.filter(u => u.username.toLowerCase().includes(q));
+    const online = users.filter(u => u.online).length;
+    $("stats").textContent = `${users.length} users · ${online} online`;
+    const tbody = $("rows");
+    tbody.replaceChildren();
+    for (const [i, u] of list.entries()) {
+      const tr = document.createElement("tr");
+      const cell = (txt) => { const td = document.createElement("td"); td.textContent = txt; tr.appendChild(td); return td; };
+      cell(i + 1);
+      const nameTd = cell(u.username);
+      if (u.is_admin) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "admin"; nameTd.appendChild(t); }
+      const st = cell(u.online ? "Online" : "Offline");
+      const dot = document.createElement("span"); dot.className = "dot" + (u.online ? " on" : ""); st.prepend(dot);
+      const bio = cell((u.avatar ? u.avatar + " · " : "") + (u.bio || "—")); bio.className = "bio";
+      cell(u.msg_count);
+      cell(u.last_message_ts ? new Date(u.last_message_ts * 1000).toLocaleString() : "—");
+      const act = document.createElement("td");
+      const b = document.createElement("button");
+      b.className = "del"; b.textContent = "Delete"; b.disabled = u.is_admin;
+      b.onclick = () => del(u.username);
+      const rp = document.createElement("button");
+      rp.className = "del"; rp.style.background = "#7a7fa3"; rp.style.marginRight = "6px";
+      rp.textContent = "Reset password"; rp.disabled = u.is_admin;
+      rp.onclick = () => resetPw(u.username);
+      act.append(rp, b); tr.appendChild(act);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderRooms() {
+    const tbody = $("room-rows");
+    tbody.replaceChildren();
+    for (const r of rooms) {
+      const tr = document.createElement("tr");
+      const cell = (txt) => { const td = document.createElement("td"); td.textContent = txt; tr.appendChild(td); return td; };
+      cell((r.is_public ? "# " : "🔒 ") + r.name);
+      cell(r.is_public ? "Public" : "Private group");
+      cell(r.owner || "—");
+      cell(r.is_public ? "everyone" : r.members);
+      cell(r.msg_count);
+      const act = document.createElement("td");
+      const b = document.createElement("button");
+      b.className = "del"; b.textContent = "Delete"; b.disabled = r.protected;
+      b.title = r.protected ? "Protected room" : "";
+      b.onclick = () => delRoom(r.name);
+      act.appendChild(b); tr.appendChild(act);
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function delRoom(name) {
+    if (!confirm(`Delete "${name}" for everyone? All its messages will be removed.`)) return;
+    try { await api("/api/admin/rooms/" + encodeURIComponent(name), "DELETE"); await load(); }
+    catch (e) { alert(e.message); }
+  }
+
+  async function resetPw(name) {
+    if (!confirm(`Reset password for "${name}"? They will be logged out and need the new temporary password.`)) return;
+    try {
+      const r = await api("/api/admin/users/" + encodeURIComponent(name) + "/reset-password", "POST");
+      prompt("Temporary password for " + r.username + " (copy it and give it to the user):", r.temp_password);
+    } catch (e) { alert(e.message); }
+  }
+
+  async function del(name) {
+    if (!confirm(`Delete user "${name}"? Their account and messages will be removed.`)) return;
+    try { await api("/api/admin/users/" + encodeURIComponent(name), "DELETE"); await load(); }
+    catch (e) { alert(e.message); }
+  }
+
+  $("go").onclick = login;
+  $("p").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
+  $("search").oninput = render;
+  $("refresh").onclick = () => load().catch(e => alert(e.message));
+  $("logout").onclick = () => { sessionStorage.removeItem("admin-token"); location.reload(); };
+
+  const saved = sessionStorage.getItem("admin-token");
+  if (saved) {
+    token = saved;
+    load().then(() => { $("login").classList.add("hidden"); $("panel").classList.remove("hidden"); })
+          .catch(() => { token = null; sessionStorage.removeItem("admin-token"); });
+  }
+})();
+</script>
+</body>
+</html>
