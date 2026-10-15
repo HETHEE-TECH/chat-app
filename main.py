@@ -105,6 +105,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER DEFAULT NULL")
         if "media" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN media TEXT DEFAULT NULL")
+        if "pinned_at" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN pinned_at REAL DEFAULT NULL")
+        if "pinned_by" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN pinned_by TEXT DEFAULT NULL")
         ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
         if "last_seen" not in ucols:
             conn.execute("ALTER TABLE users ADD COLUMN last_seen REAL")
@@ -443,6 +447,104 @@ def get_voice(msg_id: int, me: str = Depends(current_user)):
     return Response(content=bytes(v["data"]), media_type=v["mime"], headers={"Cache-Control": "private, max-age=86400"})
 
 
+MAX_PINS = 5
+
+
+class PinIn(BaseModel):
+    pin: bool
+
+
+def can_pin(conn: sqlite3.Connection, row, me: str) -> bool:
+    """DM: either friend. Private group: the owner. Public room: app admins."""
+    if row["room"]:
+        room = conn.execute("SELECT is_public FROM rooms WHERE name = ?", (row["room"],)).fetchone()
+        if not room:
+            return False
+        if room["is_public"]:
+            return me in ADMINS
+        role = conn.execute(
+            "SELECT role FROM room_members WHERE room = ? AND username = ?", (row["room"], me)
+        ).fetchone()
+        return bool(role and role["role"] == "owner")
+    return True  # DM: access was already checked with can_view_message
+
+
+@app.post("/api/messages/{msg_id}/pin")
+async def pin_message(msg_id: int, body: PinIn, me: str = Depends(current_user)):
+    with closing(db()) as conn:
+        row = conn.execute(
+            "SELECT room, sender, recipient, deleted, pinned_at FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+        if not row or row["deleted"]:
+            raise HTTPException(404, "Message not found")
+        if not can_view_message(conn, row, me):
+            raise HTTPException(403, "You cannot access this message")
+        if not can_pin(conn, row, me):
+            raise HTTPException(403, "Only the group owner can pin messages here")
+        if body.pin:
+            if row["pinned_at"] is None:
+                other = row["recipient"] if row["sender"] == me else row["sender"]
+                clause, params = _conv_clause(row["room"], other, me)
+                count = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM messages WHERE {clause} AND deleted = 0 AND pinned_at IS NOT NULL",
+                    params,
+                ).fetchone()["n"]
+                if count >= MAX_PINS:
+                    raise HTTPException(400, "You can pin up to %d messages. Unpin one first." % MAX_PINS)
+                conn.execute(
+                    "UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ?", (time.time(), me, msg_id)
+                )
+        else:
+            conn.execute("UPDATE messages SET pinned_at = NULL, pinned_by = NULL WHERE id = ?", (msg_id,))
+        conn.commit()
+    payload = {
+        "type": "pins_updated",
+        "kind": "room" if row["room"] else "dm",
+        "room": row["room"],
+        "user1": row["sender"],
+        "user2": row["recipient"],
+    }
+    if row["room"]:
+        await send_to_room(row["room"], payload)
+    else:
+        await manager.send_to_users({row["sender"], row["recipient"]}, payload)
+    return {"success": True}
+
+
+@app.get("/api/pins")
+def list_pins(
+    room: str | None = Query(default=None),
+    with_user: str | None = Query(default=None, alias="with"),
+    me: str = Depends(current_user),
+):
+    with closing(db()) as conn:
+        if room:
+            if not can_access_room(conn, room, me):
+                raise HTTPException(403, "You are not a member of this group")
+        elif with_user:
+            if not are_friends(conn, me, with_user):
+                raise HTTPException(403, "You can only view chats with friends")
+        else:
+            raise HTTPException(400, "Provide 'room' or 'with'")
+        clause, params = _conv_clause(room, with_user, me)
+        rows = conn.execute(
+            f"SELECT id, sender, content, media, ts, pinned_by FROM messages "
+            f"WHERE {clause} AND deleted = 0 AND pinned_at IS NOT NULL ORDER BY pinned_at DESC",
+            params,
+        ).fetchall()
+    out = []
+    for r in rows:
+        content = r["content"]
+        if r["media"] == "voice":
+            snippet = "\U0001F3A4 Voice message"
+        elif content.startswith(("/9j/", "iVBO")):
+            snippet = "\U0001F4F7 Photo"
+        else:
+            snippet = content[:120]
+        out.append({"id": r["id"], "sender": r["sender"], "snippet": snippet, "ts": r["ts"], "pinned_by": r["pinned_by"]})
+    return out
+
+
 class MessageEdit(BaseModel):
     content: str
 
@@ -480,7 +582,7 @@ async def delete_message(msg_id: int, me: str = Depends(current_user)):
             raise HTTPException(404, "Message not found")
         if row["sender"] != me:
             raise HTTPException(403, "Can only delete your own messages")
-        conn.execute("UPDATE messages SET deleted = 1 WHERE id = ?", (msg_id,))
+        conn.execute("UPDATE messages SET deleted = 1, pinned_at = NULL, pinned_by = NULL WHERE id = ?", (msg_id,))
         conn.execute("DELETE FROM voice_notes WHERE message_id = ?", (msg_id,))
         conn.commit()
     payload = {"type": "message_deleted", "id": msg_id}
@@ -605,6 +707,7 @@ def row_to_message(r: sqlite3.Row) -> dict:
         "deleted": bool(r["deleted"]),
         "reply_to": r["reply_to"],
         "media": r["media"],
+        "pinned": bool(r["pinned_at"]),
     }
 
 
@@ -735,7 +838,7 @@ manager = ConnectionManager()
 
 # ---------------------------------------------------------------- admin
 # the file must be named admin.py (all lowercase) - Linux hosting is case-sensitive
-from Admin import make_router  # noqa: E402
+from Admin import ADMINS, make_router  # noqa: E402
 
 app.include_router(make_router(db, current_user, manager))
 app.include_router(make_friends_router(db, current_user, manager))
@@ -770,6 +873,7 @@ def save_message(room: str | None, sender: str, recipient: str | None, content: 
         "deleted": False,
         "reply_to": reply_to,
         "media": media,
+        "pinned": False,
         "reply": reply,
         "reactions": {},
         "kind": "room" if room else "dm",
@@ -878,7 +982,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")):
                     with closing(db()) as conn:
                         row = conn.execute("SELECT sender, room, recipient FROM messages WHERE id = ?", (msg_id,)).fetchone()
                         if row and row["sender"] == username:
-                            conn.execute("UPDATE messages SET deleted = 1 WHERE id = ?", (msg_id,))
+                            conn.execute("UPDATE messages SET deleted = 1, pinned_at = NULL, pinned_by = NULL WHERE id = ?", (msg_id,))
                             conn.execute("DELETE FROM voice_notes WHERE message_id = ?", (msg_id,))
                             conn.commit()
                             payload = {"type": "message_deleted", "id": msg_id}

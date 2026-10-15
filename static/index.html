@@ -99,6 +99,13 @@
   .profile-card .gm-danger { background: var(--danger); margin-top: 14px; }
   #group-invited { font-size: 12px; color: var(--muted); }
   .head-btns { display: flex; gap: 6px; }
+  #pin-bar { display: flex; align-items: center; gap: 10px; padding: 8px 26px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #pin-bar .pin-body { flex: 1; min-width: 0; cursor: pointer; }
+  #pin-bar .pin-who { display: block; font-size: 11px; color: var(--magenta); font-weight: 700; }
+  #pin-bar .pin-text { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #pin-count { font-size: 12px; color: var(--muted); }
+  #pin-next { border: 1px solid var(--border); background: var(--mist); color: var(--text); border-radius: 999px; width: 28px; height: 28px; cursor: pointer; flex: none; }
+  .msg.pinned .meta::after { content: " 📌"; }
   .voice { display: flex; align-items: center; gap: 10px; min-width: 200px; }
   .voice .vp-btn { border: 0; width: 34px; height: 34px; border-radius: 50%; background: var(--magenta); color: #fff; cursor: pointer; font-size: 13px; flex: none; }
   .msg.mine .voice .vp-btn { background: rgba(255,255,255,.95); color: var(--magenta); }
@@ -282,6 +289,7 @@
         <button id="group-btn" type="button">Group info</button>
       </span></span>
     </div>
+    <div id="pin-bar" class="hidden"><span>📌</span><div class="pin-body" id="pin-body"><span class="pin-who" id="pin-who"></span><span class="pin-text" id="pin-text"></span></div><span id="pin-count"></span><button id="pin-next" type="button" title="Next pinned message">▸</button></div>
     <div id="search-panel" class="hidden">
       <div class="search-row">
         <input id="search-input" type="text" placeholder="Search messages in this chat…" autocomplete="off" maxlength="100">
@@ -785,6 +793,7 @@
     state.unread.delete(key);
     clearReply();
     cancelRecording();
+    state.pins = []; state.pinIdx = 0; renderPinBar(); loadPins();
     state.viewingOld = false;
     $("jump-bar").classList.add("hidden");
     closeSearch();
@@ -821,6 +830,7 @@
     const el = document.createElement("div");
     el.className = "msg" + (mine ? " mine" : "");
     el.id = "msg-" + m.id;
+    if (m.pinned) el.classList.add("pinned");
     const meta = document.createElement("div"); meta.className = "meta";
     meta.textContent = (mine ? "You" : m.sender) + " · " +
       new Date(m.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -883,6 +893,12 @@
     });
     reactBtn.onclick = (e) => { e.preventDefault(); bar.classList.toggle("show"); };
     actions.append(replyBtn, reactBtn, bar);
+    if (canTryPin()) {
+      const pinBtn = document.createElement("button");
+      pinBtn.textContent = "📌"; pinBtn.title = "Pin / unpin"; pinBtn.type = "button";
+      pinBtn.onclick = (e) => { e.preventDefault(); togglePin(m.id); };
+      actions.appendChild(pinBtn);
+    }
 
     if (mine) {
       if (!isImage && !isVoice) {
@@ -973,6 +989,9 @@
       } else if (m.type === "groups_updated") {
         refreshLists().catch(() => {});
         if ($("group-modal").classList.contains("show")) reloadGroupModal();
+      } else if (m.type === "pins_updated") {
+        const pkey = m.kind === "room" ? "room:" + m.room : "dm:" + (m.user1 === state.me ? m.user2 : m.user1);
+        if (state.current && state.current.key === pkey) loadPins();
       } else if (m.type === "avatar_updated") {
         refreshAvatar(m.username);
       } else if (m.type === "reaction") {
@@ -986,6 +1005,7 @@
         else if (m.sender !== state.me) { state.unread.add(key); renderSidebar(); }
         if (m.sender !== state.me) notifyIncoming(m, key);
       } else if (m.type === "message_edited") {
+        if (state.pins && state.pins.some((p) => p.id === m.id)) loadPins();
         const msgEl = $("msg-" + m.id);
         if (msgEl) {
           const body = msgEl.querySelector(".msg-body");
@@ -999,6 +1019,7 @@
           }
         }
       } else if (m.type === "message_deleted") {
+        if (state.pins && state.pins.some((p) => p.id === m.id)) loadPins();
         const container = $("msg-" + m.id)?.parentElement;
         if (container) container.remove();
       }
@@ -1131,6 +1152,56 @@
   $("save-edit").onclick = saveEditMsg;
   $("cancel-edit").onclick = () => $("edit-modal").classList.remove("show");
 
+
+  // ------------------------------------------------------------ Pinned messages
+  state.pins = [];
+  state.pinIdx = 0;
+
+  function canTryPin() {
+    const c = state.current;
+    if (!c) return false;
+    if (c.kind === "dm") return true;
+    const room = state.rooms.find((r) => r.name === c.name);
+    if (!room) return false;
+    return room.is_public ? true : room.role === "owner";   // public rooms: the server allows admins only
+  }
+
+  async function loadPins() {
+    const c = state.current;
+    if (!c) return;
+    const key = c.key;
+    try {
+      const pins = await api("/api/pins?" + scopeQuery());
+      if (!state.current || state.current.key !== key) return;
+      state.pins = pins;
+      if (state.pinIdx >= pins.length) state.pinIdx = 0;
+      renderPinBar();
+      document.querySelectorAll(".msg.pinned").forEach((el) => el.classList.remove("pinned"));
+      pins.forEach((p) => { const el = $("msg-" + p.id); if (el) el.classList.add("pinned"); });
+    } catch (_) { /* ignore */ }
+  }
+
+  function renderPinBar() {
+    const bar = $("pin-bar");
+    const pins = state.pins || [];
+    if (!pins.length) { bar.classList.add("hidden"); return; }
+    const p = pins[state.pinIdx] || pins[0];
+    $("pin-who").textContent = "Pinned · " + (p.sender === state.me ? "You" : p.sender);
+    $("pin-text").textContent = p.snippet;
+    $("pin-count").textContent = pins.length > 1 ? (state.pinIdx + 1) + "/" + pins.length : "";
+    $("pin-next").classList.toggle("hidden", pins.length < 2);
+    bar.classList.remove("hidden");
+  }
+
+  $("pin-body").onclick = () => { const p = state.pins[state.pinIdx]; if (p) jumpToMessage(p.id); };
+  $("pin-next").onclick = () => { if (state.pins.length) { state.pinIdx = (state.pinIdx + 1) % state.pins.length; renderPinBar(); } };
+
+  async function togglePin(id) {
+    const el = $("msg-" + id);
+    const pin = !(el && el.classList.contains("pinned"));
+    try { await api("/api/messages/" + id + "/pin", "POST", { pin }); await loadPins(); }
+    catch (e) { alert(e.message); }
+  }
 
   // ------------------------------------------------------------ Voice messages
   const MAX_VOICE_SEC = 120;
